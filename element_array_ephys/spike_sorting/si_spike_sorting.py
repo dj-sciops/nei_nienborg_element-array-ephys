@@ -382,6 +382,7 @@ class SIExport(dj.Computed):
                 sorting_analyzer=sorting_analyzer,
                 output_folder=analyzer_output_dir / "phy",
                 use_relative_path=True,
+                remove_if_exists=True,
                 **job_kwargs,
             )
 
