@@ -1,4 +1,5 @@
 import datajoint as dj
+import numpy as np
 
 from .readers import probe_geometry
 from .readers.probe_geometry import build_electrode_layouts
@@ -171,6 +172,44 @@ def create_neuropixels_probe(probe_type: str = "neuropixels 1.0 - 3A"):
     electrode_layouts = probe_geometry.build_npx_probe(
         **{**probe_params, **probe_type}
     )
+    with ProbeType.connection.transaction:
+        ProbeType.insert1(probe_type)
+        ProbeType.Electrode.insert(electrode_layouts)
+
+
+def create_microwire_brush_array_probe(probe_type: str = "microwire_brush_array", num_electrodes: int = 64):
+    """
+    This script adds the microwire multielectrode probe (https://www.microprobes.com/products/multichannel-arrays/mba) to the Probe table.
+    The probe added from this script is a 64-channel probe with a circular layout.
+    The probe diameter is assumed to be 800 um, spaced equally around the circle, centered
+    at the origin (0, 0).
+    
+    Arguments:
+        probe_type (str): Default `microwire_brush_array`. The name of the probe type.
+        num_electrodes (int): Default `64`. The number of electrodes on the probe.
+    """
+    probe_type = {"probe_type": probe_type}
+
+    # Insert the electrode coordinates
+    electrode_layouts = []
+    num_electrodes = num_electrodes
+
+    for electrode in range(num_electrodes):
+        theta = 2 * np.pi * electrode / num_electrodes
+        x = 400 * np.cos(theta)
+        y = 400 * np.sin(theta)
+        electrode_layouts.append(
+            dict(
+                probe_type=probe_type,
+                electrode=electrode,
+                shank=electrode,
+                shank_col=0,
+                shank_row=0,
+                x_coord=x,
+                y_coord=y,
+            )
+        )
+
     with ProbeType.connection.transaction:
         ProbeType.insert1(probe_type)
         ProbeType.Electrode.insert(electrode_layouts)
