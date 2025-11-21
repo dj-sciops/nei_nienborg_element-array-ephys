@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from element_interface.utils import dict_to_uuid, find_full_path, find_root_directory
 
-from . import ephys_report, probe
+from . import probe
 from .readers import kilosort, openephys, spikeglx
 
 logger = dj.logger
@@ -21,7 +21,6 @@ _linking_module = None
 
 def activate(
     ephys_schema_name: str,
-    probe_schema_name: str = None,
     *,
     create_schema: bool = True,
     create_tables: bool = True,
@@ -31,7 +30,6 @@ def activate(
 
     Args:
         ephys_schema_name (str): A string containing the name of the ephys schema.
-        probe_schema_name (str): A string containing the name of the probe schema.
         create_schema (bool): If True, schema will be created in the database.
         create_tables (bool): If True, tables related to the schema will be created in the database.
         linking_module (str): A string containing the module name or module containing the required dependencies to activate the schema.
@@ -45,7 +43,6 @@ def activate(
         get_ephys_root_data_dir(): Returns absolute path for root data director(y/ies) with all electrophysiological recording sessions, as a list of string(s).
         get_session_direction(session_key: dict): Returns path to electrophysiology data for the a particular session as a list of strings.
         get_processed_data_dir(): Optional. Returns absolute path for processed data. Defaults to root directory.
-
     """
 
     if isinstance(linking_module, str):
@@ -57,16 +54,15 @@ def activate(
     global _linking_module
     _linking_module = linking_module
 
-    probe.activate(
-        probe_schema_name, create_schema=create_schema, create_tables=create_tables
-    )
+    if not probe.schema.is_activated():
+        raise RuntimeError("Please activate the `probe` schema first.")
+
     schema.activate(
         ephys_schema_name,
         create_schema=create_schema,
         create_tables=create_tables,
         add_objects=_linking_module.__dict__,
     )
-    ephys_report.activate(f"{ephys_schema_name}_report", ephys_schema_name)
 
 
 # -------------- Functions required by the elements-ephys  ---------------
@@ -192,10 +188,7 @@ class ProbeInsertion(dj.Manual):
                     "probe_type": spikeglx_meta.probe_model,
                     "probe": spikeglx_meta.probe_SN,
                 }
-                if (
-                    probe_key["probe"] not in [p["probe"] for p in probe_list]
-                    and probe_key not in probe.Probe()
-                ):
+                if probe_key["probe"] not in [p["probe"] for p in probe_list]:
                     probe_list.append(probe_key)
 
                 probe_dir = meta_filepath.parent
@@ -219,10 +212,7 @@ class ProbeInsertion(dj.Manual):
                     "probe_type": oe_probe.probe_model,
                     "probe": oe_probe.probe_SN,
                 }
-                if (
-                    probe_key["probe"] not in [p["probe"] for p in probe_list]
-                    and probe_key not in probe.Probe()
-                ):
+                if probe_key["probe"] not in [p["probe"] for p in probe_list]:
                     probe_list.append(probe_key)
                 probe_insertion_list.append(
                     {
@@ -234,7 +224,7 @@ class ProbeInsertion(dj.Manual):
         else:
             raise NotImplementedError(f"Unknown acquisition software: {acq_software}")
 
-        probe.Probe.insert(probe_list)
+        probe.Probe.insert(probe_list, skip_duplicates=True)
         cls.insert(probe_insertion_list, skip_duplicates=True)
 
 
@@ -920,7 +910,7 @@ class Clustering(dj.Imported):
             ).fetch1("acq_software", "clustering_method", "params")
 
             if "kilosort" in clustering_method:
-                from element_array_ephys.readers import kilosort_triggering
+                from .spike_sorting import kilosort_triggering
 
                 # add additional probe-recording and channels details into `params`
                 params = {**params, **get_recording_channels_details(key)}
@@ -1062,7 +1052,9 @@ class CuratedClustering(dj.Imported):
                 sorting_file, base_folder=output_dir
             )
             if si_sorting_.unit_ids.size == 0:
-                logger.info(f"No units found in {sorting_file}. Skipping Unit ingestion...")
+                logger.info(
+                    f"No units found in {sorting_file}. Skipping Unit ingestion..."
+                )
                 self.insert1(key)
                 return
 
@@ -1104,9 +1096,14 @@ class CuratedClustering(dj.Imported):
             }
 
             spike_locations = sorting_analyzer.get_extension("spike_locations")
-            extremum_channel_inds = si.template_tools.get_template_extremum_channel(sorting_analyzer, outputs="index")
+            extremum_channel_inds = si.template_tools.get_template_extremum_channel(
+                sorting_analyzer, outputs="index"
+            )
             spikes_df = pd.DataFrame(
-                sorting_analyzer.sorting.to_spike_vector(extremum_channel_inds=extremum_channel_inds))
+                sorting_analyzer.sorting.to_spike_vector(
+                    extremum_channel_inds=extremum_channel_inds
+                )
+            )
 
             ephys_sync_func = get_sync_ephys_function(key)
 
@@ -1277,7 +1274,9 @@ class WaveformSet(dj.Imported):
 
         self.insert1(key)
         if not len(CuratedClustering.Unit & key):
-            logger.info(f"No CuratedClustering.Unit found for {key}, skipping Waveform ingestion.")
+            logger.info(
+                f"No CuratedClustering.Unit found for {key}, skipping Waveform ingestion."
+            )
             return
 
         # Get channel and electrode-site mapping
@@ -1337,6 +1336,7 @@ class WaveformSet(dj.Imported):
                     ]
 
                     yield unit_peak_waveform, unit_electrode_waveforms
+
         else:  # read from kilosort outputs (ecephys pipeline)
             kilosort_dataset = kilosort.Kilosort(output_dir)
 
@@ -1544,7 +1544,9 @@ class QualityMetrics(dj.Imported):
 
         self.insert1(key)
         if not len(CuratedClustering.Unit & key):
-            logger.info(f"No CuratedClustering.Unit found for {key}, skipping QualityMetrics ingestion.")
+            logger.info(
+                f"No CuratedClustering.Unit found for {key}, skipping QualityMetrics ingestion."
+            )
             return
 
         si_sorting_analyzer_dir = output_dir / sorter_name / "sorting_analyzer"

@@ -1,5 +1,7 @@
 """
-The following DataJoint pipeline implements the sequence of steps in the spike-sorting routine featured in the "spikeinterface" pipeline. Spikeinterface was developed by Alessio Buccino, Samuel Garcia, Cole Hurwitz, Jeremy Magland, and Matthias Hennig (https://github.com/SpikeInterface)
+The following DataJoint pipeline implements the sequence of steps in the spike-sorting routine featured in the "spikeinterface" pipeline.
+Spikeinterface was developed by Alessio Buccino, Samuel Garcia, Cole Hurwitz, Jeremy Magland, and Matthias Hennig (https://github.com/SpikeInterface)
+If you use this pipeline, please cite SpikeInterface and the relevant sorter(s) used in your publication (see https://github.com/SpikeInterface for additional details for citation).
 """
 
 from datetime import datetime
@@ -7,7 +9,7 @@ from datetime import datetime
 import datajoint as dj
 import pandas as pd
 import spikeinterface as si
-from element_array_ephys import probe, readers
+from element_array_ephys import probe, ephys, readers
 from element_interface.utils import find_full_path, memoized_result
 from spikeinterface import exporters, extractors, sorters
 
@@ -17,25 +19,25 @@ log = dj.logger
 
 schema = dj.schema()
 
-ephys = None
-
 
 def activate(
     schema_name,
     *,
-    ephys_module,
     create_schema=True,
     create_tables=True,
 ):
+    """Activate the current schema.
+
+    Args:
+        schema_name (str): schema name on the database server to activate the `si_spike_sorting` schema.
+        create_schema (bool, optional): If True (default), create schema in the database if it does not yet exist.
+        create_tables (bool, optional): If True (default), create tables in the database if they do not yet exist.
     """
-    activate(schema_name, *, create_schema=True, create_tables=True, activated_ephys=None)
-        :param schema_name: schema name on the database server to activate the `spike_sorting` schema
-        :param ephys_module: the activated ephys element for which this `spike_sorting` schema will be downstream from
-        :param create_schema: when True (default), create schema in the database if it does not yet exist.
-        :param create_tables: when True (default), create tables in the database if they do not yet exist.
-    """
-    global ephys
-    ephys = ephys_module
+    if not probe.schema.is_activated():
+        raise RuntimeError("Please activate the `probe` schema first.")
+    if not ephys.schema.is_activated():
+        raise RuntimeError("Please activate the `ephys` schema first.")
+
     schema.activate(
         schema_name,
         create_schema=create_schema,
@@ -132,7 +134,9 @@ class PreProcessing(dj.Imported):
             spikeglx_recording.validate_file("ap")
             data_dir = spikeglx_meta_filepath.parent
 
-            si_extractor = si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
+            si_extractor = (
+                si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
+            )
             stream_names, stream_ids = si.extractors.get_neo_streams(
                 "spikeglx", folder_path=data_dir
             )
@@ -143,7 +147,9 @@ class PreProcessing(dj.Imported):
             oe_probe = ephys.get_openephys_probe_data(key)
             assert len(oe_probe.recording_info["recording_files"]) == 1
             data_dir = oe_probe.recording_info["recording_files"][0]
-            si_extractor = si.extractors.neoextractors.openephys.OpenEphysBinaryRecordingExtractor
+            si_extractor = (
+                si.extractors.neoextractors.openephys.OpenEphysBinaryRecordingExtractor
+            )
 
             stream_names, stream_ids = si.extractors.get_neo_streams(
                 "openephysbinary", folder_path=data_dir
@@ -277,13 +283,15 @@ class SIClustering(dj.Imported):
             }
         )
         # Insert result files
-        self.File.insert(
-            [
-                {**key, "file_name": f.relative_to(sorting_output_dir).as_posix(), "file": f}
-                for f in sorting_output_dir.rglob("*")
-                if f.is_file()
-            ]
-        )
+        for f in sorting_output_dir.rglob("*"):
+            if f.is_file():
+                self.File.insert1(
+                    {
+                        **key,
+                        "file_name": f.relative_to(sorting_output_dir).as_posix(),
+                        "file": f,
+                    }
+                )
 
 
 @schema
@@ -328,7 +336,7 @@ class PostProcessing(dj.Imported):
 
         postprocessing_params = params["SI_POSTPROCESSING_PARAMS"]
 
-        job_kwargs = postprocessing_params.get(
+        job_kwargs = postprocessing_params.pop(
             "job_kwargs", {"n_jobs": -1, "chunk_duration": "1s"}
         )
 
@@ -343,7 +351,9 @@ class PostProcessing(dj.Imported):
         def _sorting_analyzer_compute():
             if not has_units:
                 log.info("No units found in sorting object. Skipping sorting analyzer.")
-                analyzer_output_dir.mkdir(parents=True, exist_ok=True)  # create empty directory anyway, for consistency
+                analyzer_output_dir.mkdir(
+                    parents=True, exist_ok=True
+                )  # create empty directory anyway, for consistency
                 return
 
             # Sorting Analyzer
@@ -369,7 +379,9 @@ class PostProcessing(dj.Imported):
 
         _sorting_analyzer_compute()
 
-        do_si_export = postprocessing_params.get("export_to_phy", False) or postprocessing_params.get("export_report", False)
+        do_si_export = postprocessing_params.get(
+            "export_to_phy", False
+        ) or postprocessing_params.get("export_report", False)
 
         self.insert1(
             {
@@ -382,13 +394,15 @@ class PostProcessing(dj.Imported):
                 "do_si_export": do_si_export and has_units,
             }
         )
-        self.File.insert(
-            [
-                {**key, "file_name": f.relative_to(analyzer_output_dir).as_posix(), "file": f}
-                for f in analyzer_output_dir.rglob("*")
-                if f.is_file()
-            ]
-        )
+        for f in analyzer_output_dir.rglob("*"):
+            if f.is_file():
+                self.File.insert1(
+                    {
+                        **key,
+                        "file_name": f.relative_to(analyzer_output_dir).as_posix(),
+                        "file": f,
+                    }
+                )
 
         # Once finished, insert this `key` into ephys.Clustering
         ephys.Clustering.insert1(
@@ -430,7 +444,7 @@ class SIExport(dj.Computed):
 
         postprocessing_params = params["SI_POSTPROCESSING_PARAMS"]
 
-        job_kwargs = postprocessing_params.get(
+        job_kwargs = postprocessing_params.pop(
             "job_kwargs", {"n_jobs": -1, "chunk_duration": "1s"}
         )
 
@@ -448,6 +462,7 @@ class SIExport(dj.Computed):
                 output_folder=analyzer_output_dir / "phy",
                 use_relative_path=True,
                 remove_if_exists=True,
+                copy_binary=True,
                 **job_kwargs,
             )
 
@@ -460,6 +475,7 @@ class SIExport(dj.Computed):
             si.exporters.export_report(
                 sorting_analyzer=sorting_analyzer,
                 output_folder=analyzer_output_dir / "spikeinterface_report",
+                remove_if_exists=True,
                 **job_kwargs,
             )
 
@@ -480,14 +496,12 @@ class SIExport(dj.Computed):
         )
         # Insert result files
         for report_dirname in ("spikeinterface_report", "phy"):
-            self.File.insert(
-                [
-                    {
-                        **key,
-                        "file_name": f.relative_to(analyzer_output_dir).as_posix(),
-                        "file": f,
-                    }
-                    for f in (analyzer_output_dir / report_dirname).rglob("*")
-                    if f.is_file()
-                ]
-            )
+            for f in (analyzer_output_dir / report_dirname).rglob("*"):
+                if f.is_file():
+                    self.File.insert1(
+                        {
+                            **key,
+                            "file_name": f.relative_to(analyzer_output_dir).as_posix(),
+                            "file": f,
+                        }
+                    )
