@@ -9,6 +9,7 @@ from datetime import datetime
 import datajoint as dj
 import pandas as pd
 import spikeinterface as si
+from pathlib import Path
 from element_array_ephys import probe, ephys, readers
 from element_interface.utils import find_full_path, memoized_result
 from spikeinterface import exporters, extractors, sorters
@@ -127,22 +128,32 @@ class PreProcessing(dj.Imported):
 
         # Create SI recording extractor object
         if acq_software == "SpikeGLX":
-            spikeglx_meta_filepath = ephys.get_spikeglx_meta_filepath(key)
-            spikeglx_recording = readers.spikeglx.SpikeGLX(
-                spikeglx_meta_filepath.parent
-            )
-            spikeglx_recording.validate_file("ap")
-            data_dir = spikeglx_meta_filepath.parent
+            si_extractor = si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
+            spikeglx_meta_filepaths = (
+                ephys.EphysRecording.EphysFile
+                & key
+                & 'file_path LIKE "%.ap.meta"'
+            ).fetch("file_path")
+            ap_bin_filepaths = [
+                find_full_path(ephys.get_ephys_root_data_dir(), Path(f).with_suffix(".bin"))
+                for f in spikeglx_meta_filepaths
+            ]
 
-            si_extractor = (
-                si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
-            )
-            stream_names, stream_ids = si.extractors.get_neo_streams(
-                "spikeglx", folder_path=data_dir
-            )
-            si_recording: si.BaseRecording = si_extractor(
-                folder_path=data_dir, stream_name=stream_names[0]
-            )
+            si_recs = []
+            for ap_bin_filepath in ap_bin_filepaths:
+                data_dir = ap_bin_filepath.parent
+                spikeglx_recording = readers.spikeglx.SpikeGLX(
+                    data_dir
+                )
+                spikeglx_recording.validate_file("ap")
+                stream_names, stream_ids = si.extractors.get_neo_streams(
+                    "spikeglx", folder_path=data_dir
+                )
+                si_rec: si.BaseRecording = si_extractor(
+                    folder_path=data_dir, stream_name=stream_names[0]
+                )
+                si_recs.append(si_rec)
+            si_recording = si.concatenate_recordings(si_recs)
         elif acq_software == "Open Ephys":
             oe_probe = ephys.get_openephys_probe_data(key)
             assert len(oe_probe.recording_info["recording_files"]) == 1
@@ -170,17 +181,17 @@ class PreProcessing(dj.Imported):
                 si_rec = si_extractor(file_path=f, stream_name="nsx5")
                 si_recs.append(si_rec)
             si_recording = si.concatenate_recordings(si_recs)
-            # find & remove extra channels
-            in_use_chn_ids = si_recording.channel_ids[electrodes_df.channel_idx.values]
-            chn2remove = set(si_recording.channel_ids) - set(in_use_chn_ids)
-            si_recording = si_recording.remove_channels(list(chn2remove))
-            in_use_chn_ind = [si_recording.channel_ids.tolist().index(chn_id) for chn_id in in_use_chn_ids]
-            electrodes_df.channel_idx = in_use_chn_ind
         else:
             raise NotImplementedError(
                 f"SpikeInterface processing for {acq_software} not yet implemented."
             )
 
+        # Find & remove extra channels
+        in_use_chn_ids = si_recording.channel_ids[electrodes_df.channel_idx.values]
+        chn2remove = set(si_recording.channel_ids) - set(in_use_chn_ids)
+        si_recording = si_recording.remove_channels(list(chn2remove))
+        in_use_chn_ind = [si_recording.channel_ids.tolist().index(chn_id) for chn_id in in_use_chn_ids]
+        electrodes_df.channel_idx = in_use_chn_ind
         # Create SI probe object
         si_probe = readers.probe_geometry.to_probeinterface(
             electrodes_df[["electrode", "x_coord", "y_coord", "shank"]]
