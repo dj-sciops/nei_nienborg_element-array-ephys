@@ -1083,11 +1083,11 @@ class CuratedClustering(dj.Imported):
         manual_label: varchar(64)  # manual label for a particular unit/cluster
         """
 
-    def make(self, key):
-        """Automated population of Unit information."""
+    def make_fetch(self, key, **kwargs):
         clustering_method, output_dir = (
             ClusteringTask * ClusteringParamSet & key
         ).fetch1("clustering_method", "clustering_output_dir")
+
         output_dir = find_full_path(get_ephys_root_data_dir(), output_dir)
 
         # Get channel and electrode-site mapping
@@ -1095,11 +1095,71 @@ class CuratedClustering(dj.Imported):
         channel2electrode_map: dict[int, dict] = {
             chn.pop("channel_idx"): chn for chn in electrode_query.fetch(as_dict=True)
         }
-        # Get sorter method and create output directory.
+
         sorter_name = clustering_method.replace(".", "_")
         si_sorting_analyzer_dir = output_dir / sorter_name / "sorting_analyzer"
 
-        if si_sorting_analyzer_dir.exists():  # Read from spikeinterface outputs
+        si_export_exists = si_sorting_analyzer_dir.exists()
+
+        if si_export_exists:  # Read from spikeinterface outputs
+            # create channel2electrode_map
+            electrode_map: dict[int, dict] = {
+                elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
+            }
+
+            ephys_sync_func = get_sync_ephys_function(key)
+
+            return (
+                (
+                    si_export_exists,
+                    output_dir,
+                    sorter_name,
+                    channel2electrode_map,
+                    electrode_map,
+                    ephys_sync_func,
+                ),
+            )
+
+        else:
+            logger.warning(
+                "SI export not found: populating CuratedClustering with Kilosort output. May not sync correctly!"
+            )
+            acq_software, sample_rate = (EphysRecording & key).fetch1(
+                "acq_software", "sampling_rate"
+            )
+
+            return (
+                (
+                    si_export_exists,
+                    output_dir,
+                    sorter_name,
+                    channel2electrode_map,
+                    sample_rate,
+                ),
+            )
+
+    def make_compute(self, key, fetched):
+        # unpack passed values
+        if fetched[0]:
+            (
+                si_export_exists,
+                output_dir,
+                sorter_name,
+                channel2electrode_map,
+                electrode_map,
+                ephys_sync_func,
+            ) = fetched
+        else:
+            (
+                si_export_exists,
+                output_dir,
+                sorter_name,
+                channel2electrode_map,
+                sample_rate,
+            ) = fetched
+
+        si_sorting_analyzer_dir = output_dir / sorter_name / "sorting_analyzer"
+        if si_export_exists:
             import spikeinterface as si
             from spikeinterface import sorters
 
@@ -1111,8 +1171,7 @@ class CuratedClustering(dj.Imported):
                 logger.info(
                     f"No units found in {sorting_file}. Skipping Unit ingestion..."
                 )
-                self.insert1(key)
-                return
+                return (None,)
 
             sorting_analyzer = si.load_sorting_analyzer(folder=si_sorting_analyzer_dir)
             si_sorting = sorting_analyzer.sorting
@@ -1132,9 +1191,10 @@ class CuratedClustering(dj.Imported):
             # {unit: spike_count}
 
             # create channel2electrode_map
-            electrode_map: dict[int, dict] = {
-                elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
-            }
+            # (electrode_map created in make_fetch)
+            # electrode_map: dict[int, dict] = {
+            #     elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
+            # }
             channel2electrode_map = {
                 chn_idx: electrode_map[int(elec_id)]
                 for chn_idx, elec_id in zip(
@@ -1163,7 +1223,7 @@ class CuratedClustering(dj.Imported):
                 )
             )
 
-            ephys_sync_func = get_sync_ephys_function(key)
+            # ephys_sync_func = get_sync_ephys_function(key) # from make_fetch
 
             units = []
             for unit_idx, unit_id in enumerate(si_sorting.unit_ids):
@@ -1196,11 +1256,12 @@ class CuratedClustering(dj.Imported):
                         "spike_depths": spike_depths,
                     }
                 )
+
         else:  # read from kilosort outputs
             kilosort_dataset = kilosort.Kilosort(output_dir)
-            acq_software, sample_rate = (EphysRecording & key).fetch1(
-                "acq_software", "sampling_rate"
-            )
+            # acq_software, sample_rate = (EphysRecording & key).fetch1(
+            #     "acq_software", "sampling_rate"
+            # )
 
             sample_rate = kilosort_dataset.data["params"].get(
                 "sample_rate", sample_rate
@@ -1267,8 +1328,207 @@ class CuratedClustering(dj.Imported):
                         }
                     )
 
-        self.insert1(key)
-        self.Unit.insert(units, ignore_extra_fields=True)
+        return ((units,),)
+
+    def make_insert(self, key, computed):
+        (units,) = computed
+
+        if units is None:
+            self.insert1(key)
+
+        # split insert to make transaction more manageable
+        else:
+            self.insert1(key)
+            for i in range(0, len(units), 64):
+                units_slice = units[i : i + 64]
+                self.Unit.insert(units_slice, ignore_extra_fields=True)
+
+    # def make(self, key):
+    #     """Automated population of Unit information."""
+    #     clustering_method, output_dir = (
+    #         ClusteringTask * ClusteringParamSet & key
+    #     ).fetch1("clustering_method", "clustering_output_dir")
+    #     output_dir = find_full_path(get_ephys_root_data_dir(), output_dir)
+
+    #     # Get channel and electrode-site mapping
+    #     electrode_query = (EphysRecording.Channel & key).proj(..., "-channel_name")
+    #     channel2electrode_map: dict[int, dict] = {
+    #         chn.pop("channel_idx"): chn for chn in electrode_query.fetch(as_dict=True)
+    #     }
+    #     # Get sorter method and create output directory.
+    #     sorter_name = clustering_method.replace(".", "_")
+    #     si_sorting_analyzer_dir = output_dir / sorter_name / "sorting_analyzer"
+
+    #     if si_sorting_analyzer_dir.exists():  # Read from spikeinterface outputs
+    #         import spikeinterface as si
+    #         from spikeinterface import sorters
+
+    #         sorting_file = output_dir / sorter_name / "spike_sorting" / "si_sorting.pkl"
+    #         si_sorting_: si.sorters.BaseSorter = si.load_extractor(
+    #             sorting_file, base_folder=output_dir
+    #         )
+    #         if si_sorting_.unit_ids.size == 0:
+    #             logger.info(
+    #                 f"No units found in {sorting_file}. Skipping Unit ingestion..."
+    #             )
+    #             self.insert1(key)
+    #             return
+
+    #         sorting_analyzer = si.load_sorting_analyzer(folder=si_sorting_analyzer_dir)
+    #         si_sorting = sorting_analyzer.sorting
+
+    #         # Find representative channel for each unit
+    #         unit_peak_channel: dict[int, np.ndarray] = (
+    #             si.ChannelSparsity.from_best_channels(
+    #                 sorting_analyzer,
+    #                 1,
+    #             ).unit_id_to_channel_indices
+    #         )
+    #         unit_peak_channel: dict[int, int] = {
+    #             u: chn[0] for u, chn in unit_peak_channel.items()
+    #         }
+
+    #         spike_count_dict: dict[int, int] = si_sorting.count_num_spikes_per_unit()
+    #         # {unit: spike_count}
+
+    #         # create channel2electrode_map
+    #         electrode_map: dict[int, dict] = {
+    #             elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
+    #         }
+    #         channel2electrode_map = {
+    #             chn_idx: electrode_map[int(elec_id)]
+    #             for chn_idx, elec_id in zip(
+    #                 sorting_analyzer.get_probe().device_channel_indices,
+    #                 sorting_analyzer.get_probe().contact_ids,
+    #             )
+    #         }
+
+    #         # Get unit id to quality label mapping
+    #         cluster_quality_label_map = {
+    #             int(unit_id): (
+    #                 si_sorting.get_unit_property(unit_id, "KSLabel")
+    #                 if "KSLabel" in si_sorting.get_property_keys()
+    #                 else "n.a."
+    #             )
+    #             for unit_id in si_sorting.unit_ids
+    #         }
+
+    #         spike_locations = sorting_analyzer.get_extension("spike_locations")
+    #         extremum_channel_inds = si.template_tools.get_template_extremum_channel(
+    #             sorting_analyzer, outputs="index"
+    #         )
+    #         spikes_df = pd.DataFrame(
+    #             sorting_analyzer.sorting.to_spike_vector(
+    #                 extremum_channel_inds=extremum_channel_inds
+    #             )
+    #         )
+
+    #         ephys_sync_func = get_sync_ephys_function(key)
+
+    #         units = []
+    #         for unit_idx, unit_id in enumerate(si_sorting.unit_ids):
+    #             unit_id = int(unit_id)
+    #             unit_spikes_df = spikes_df[spikes_df.unit_index == unit_idx]
+    #             spike_sites = np.array(
+    #                 [
+    #                     channel2electrode_map[chn_idx]["electrode"]
+    #                     for chn_idx in unit_spikes_df.channel_index
+    #                 ]
+    #             )
+    #             unit_spikes_loc = spike_locations.get_data()[unit_spikes_df.index]
+    #             _, spike_depths = zip(*unit_spikes_loc)  # x-coordinates, y-coordinates
+    #             spike_times = si_sorting.get_unit_spike_train(
+    #                 unit_id, return_times=True
+    #             )
+    #             spike_times = ephys_sync_func(spike_times)
+
+    #             assert len(spike_times) == len(spike_sites) == len(spike_depths)
+
+    #             units.append(
+    #                 {
+    #                     **key,
+    #                     **channel2electrode_map[unit_peak_channel[unit_id]],
+    #                     "unit": unit_id,
+    #                     "cluster_quality_label": cluster_quality_label_map[unit_id],
+    #                     "spike_times": spike_times,
+    #                     "spike_count": spike_count_dict[unit_id],
+    #                     "spike_sites": spike_sites,
+    #                     "spike_depths": spike_depths,
+    #                 }
+    #             )
+    #     else:  # read from kilosort outputs
+    #         kilosort_dataset = kilosort.Kilosort(output_dir)
+    #         acq_software, sample_rate = (EphysRecording & key).fetch1(
+    #             "acq_software", "sampling_rate"
+    #         )
+
+    #         sample_rate = kilosort_dataset.data["params"].get(
+    #             "sample_rate", sample_rate
+    #         )
+
+    #         # ---------- Unit ----------
+    #         # -- Remove 0-spike units
+    #         withspike_idx = [
+    #             i
+    #             for i, u in enumerate(kilosort_dataset.data["cluster_ids"])
+    #             if (kilosort_dataset.data["spike_clusters"] == u).any()
+    #         ]
+    #         valid_units = kilosort_dataset.data["cluster_ids"][withspike_idx]
+    #         valid_unit_labels = kilosort_dataset.data["cluster_groups"][withspike_idx]
+
+    #         # -- Spike-times --
+    #         # spike_times_sec_adj > spike_times_sec > spike_times
+    #         spike_time_key = (
+    #             "spike_times_sec_adj"
+    #             if "spike_times_sec_adj" in kilosort_dataset.data
+    #             else (
+    #                 "spike_times_sec"
+    #                 if "spike_times_sec" in kilosort_dataset.data
+    #                 else "spike_times"
+    #             )
+    #         )
+    #         spike_times = kilosort_dataset.data[spike_time_key]
+    #         kilosort_dataset.extract_spike_depths()
+
+    #         # -- Spike-sites and Spike-depths --
+    #         spike_sites = np.array(
+    #             [
+    #                 channel2electrode_map[s]["electrode"]
+    #                 for s in kilosort_dataset.data["spike_sites"]
+    #             ]
+    #         )
+    #         spike_depths = kilosort_dataset.data["spike_depths"]
+
+    #         # -- Insert unit, label, peak-chn
+    #         units = []
+    #         for unit, unit_lbl in zip(valid_units, valid_unit_labels):
+    #             if (kilosort_dataset.data["spike_clusters"] == unit).any():
+    #                 unit_channel, _ = kilosort_dataset.get_best_channel(unit)
+    #                 unit_spike_times = (
+    #                     spike_times[kilosort_dataset.data["spike_clusters"] == unit]
+    #                     / sample_rate
+    #                 )
+    #                 spike_count = len(unit_spike_times)
+
+    #                 units.append(
+    #                     {
+    #                         **key,
+    #                         "unit": unit,
+    #                         "cluster_quality_label": unit_lbl,
+    #                         **channel2electrode_map[unit_channel],
+    #                         "spike_times": unit_spike_times,
+    #                         "spike_count": spike_count,
+    #                         "spike_sites": spike_sites[
+    #                             kilosort_dataset.data["spike_clusters"] == unit
+    #                         ],
+    #                         "spike_depths": spike_depths[
+    #                             kilosort_dataset.data["spike_clusters"] == unit
+    #                         ],
+    #                     }
+    #                 )
+
+    #     self.insert1(key)
+    #     self.Unit.insert(units, ignore_extra_fields=True)
 
 
 @schema
