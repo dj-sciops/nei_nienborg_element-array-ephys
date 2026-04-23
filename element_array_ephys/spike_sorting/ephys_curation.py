@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import os
-import datajoint as dj
+import json
+
+# import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-import json
-import shutil
+
+import datajoint as dj
 import numpy as np
 import pandas as pd
-from element_interface.utils import dict_to_uuid, find_full_path
+from element_interface.utils import find_full_path
 
 from element_array_ephys import ephys
 from element_array_ephys.spike_sorting import si_spike_sorting as ephys_sorter
-
 
 logger = dj.logger
 
@@ -115,13 +116,14 @@ class ManualCuration(dj.Manual):
         if curation_method != "Phy":
             raise ValueError(f"Unsupported curation method: {curation_method}")
 
-        init_datetime = datetime.now(timezone.utc)
+        # init_datetime = datetime.now(timezone.utc)
 
         # Download the spike sorting results
         assert ephys.CuratedClustering & key, f"Invalid ephys.Clustering key: {key}"
         if len(ephys.CuratedClustering.Unit & key) == 0:
             logger.warning("This clustering has no units!!!")
 
+        extra_files = []
         if parent_curation_id == -1:
             assert (
                 ephys_sorter.SIExport & key
@@ -130,6 +132,11 @@ class ManualCuration(dj.Manual):
                 ephys_sorter.SIExport.File
                 & key
                 & "file_name LIKE 'phy%' AND file_name NOT LIKE '%recording.dat'"
+            )
+            extra_files += list(
+                (
+                    ephys_sorter.SIClustering.File & key & "file_name LIKE '%KSLabel%'"
+                ).fetch("file")
             )
         else:
             assert cls & {
@@ -159,6 +166,12 @@ class ManualCuration(dj.Manual):
             f = Path(f)
             if f.name.startswith(".") and f.suffix in (".json", ".pickle"):
                 continue
+            new_f = curation_output_dir / f.name
+            if not new_f.exists() or if_exists == "overwrite":
+                shutil.copy2(f, new_f)
+
+        for f in extra_files:
+            f = Path(f)
             new_f = curation_output_dir / f.name
             if not new_f.exists() or if_exists == "overwrite":
                 shutil.copy2(f, new_f)
@@ -376,9 +389,7 @@ class ApplyOfficialCuration(dj.Imported):
             next(Path(f) for f in curated_files if Path(f).name == "params.py")
         ).parent
 
-        curation_method = (ManualCuration & official_key).fetch1(
-            "curation_method"
-        )
+        curation_method = (ManualCuration & official_key).fetch1("curation_method")
 
         if curation_method != "Phy":
             raise ValueError(f"Unsupported curation method: {curation_method}")
