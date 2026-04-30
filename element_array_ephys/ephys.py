@@ -1105,8 +1105,7 @@ class CuratedClustering(dj.Imported):
         ephys_sync_func = None
         if use_spikeinterface:
             electrode_map = {
-                elec["electrode"]: elec
-                for elec in electrode_query.fetch(as_dict=True)
+                elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
             }
             ephys_sync_func = get_sync_ephys_function(key)
 
@@ -1299,7 +1298,7 @@ class CuratedClustering(dj.Imported):
                         }
                     )
 
-        return units
+        return (units,)
 
     def make_insert(self, key, units):
         """Insert clustering results, batching units in groups of 64."""
