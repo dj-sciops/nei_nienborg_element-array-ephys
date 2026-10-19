@@ -1288,7 +1288,7 @@ class CuratedClustering(dj.Imported):
                             "unit": unit,
                             "cluster_quality_label": unit_lbl,
                             **channel2electrode_map[unit_channel],
-                            "spike_times": unit_spike_times,
+                            "spike_times": ephys_sync_func(unit_spike_times),
                             "spike_count": spike_count,
                             "spike_sites": spike_sites[
                                 kilosort_dataset.data["spike_clusters"] == unit
