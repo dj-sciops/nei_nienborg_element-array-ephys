@@ -384,6 +384,7 @@ class ApplyOfficialCuration(dj.Imported):
             raise ValueError(f"Unsupported curation method: {curation_method}")
 
         clus_key = (ephys.Clustering & key).fetch1("KEY")
+        ephys_sync_func = ephys.get_sync_ephys_function(clus_key)
 
         kilosort_dataset = kilosort.Kilosort(curation_output_dir)
 
@@ -493,7 +494,7 @@ class ApplyOfficialCuration(dj.Imported):
                         **unit_key,
                         "cluster_quality_label": "no kilosort label",  # new units will have "no kilosort label" label
                         **channel2electrode_map[unit_channel],
-                        "spike_times": unit_spike_times,
+                        "spike_times": ephys_sync_func(unit_spike_times),
                         "spike_count": spike_count,
                         "spike_sites": spike_sites[
                             kilosort_dataset.data["spike_clusters"] == cluster_id

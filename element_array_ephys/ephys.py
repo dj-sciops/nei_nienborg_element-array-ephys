@@ -1100,15 +1100,14 @@ class CuratedClustering(dj.Imported):
         si_sorting_analyzer_dir = output_dir / sorter_name / "sorting_analyzer"
         use_spikeinterface = si_sorting_analyzer_dir.exists()
 
-        # SI path: electrode map keyed by electrode ID, and sync function
+        # SI path: electrode map keyed by electrode ID
         electrode_map = None
-        ephys_sync_func = None
+        ephys_sync_func = get_sync_ephys_function(key)
         if use_spikeinterface:
             electrode_map = {
                 elec["electrode"]: elec
                 for elec in electrode_query.fetch(as_dict=True)
             }
-            ephys_sync_func = get_sync_ephys_function(key)
 
         # Kilosort path: sampling rate from recording
         sample_rate = None
@@ -1288,7 +1287,7 @@ class CuratedClustering(dj.Imported):
                             "unit": unit,
                             "cluster_quality_label": unit_lbl,
                             **channel2electrode_map[unit_channel],
-                            "spike_times": unit_spike_times,
+                            "spike_times": ephys_sync_func(unit_spike_times),
                             "spike_count": spike_count,
                             "spike_sites": spike_sites[
                                 kilosort_dataset.data["spike_clusters"] == unit
