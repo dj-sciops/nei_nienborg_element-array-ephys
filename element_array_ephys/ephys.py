@@ -1108,7 +1108,7 @@ class CuratedClustering(dj.Imported):
                 elec["electrode"]: elec
                 for elec in electrode_query.fetch(as_dict=True)
             }
-            ephys_sync_func = get_sync_ephys_function(key)
+        ephys_sync_func = get_sync_ephys_function(key)
 
         # Kilosort path: sampling rate from recording
         sample_rate = None
