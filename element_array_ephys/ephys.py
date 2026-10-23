@@ -623,14 +623,13 @@ class LFP(dj.Imported):
             lfp_time_stamps = (
                 np.arange(lfp.shape[1]) / spikeglx_recording.lfmeta.meta["imSampRate"]
             )
-            lfp_mean=lfp.mean(axis=0)
+            lfp_mean = lfp.mean(axis=0)
 
             # exclude unsynchronized timestamps
-            synced_timestamps = ephys_sync_func(lfp_time_stamps)            
+            synced_timestamps = ephys_sync_func(lfp_time_stamps)
             timestamp_valid_mask = ~np.isnan(synced_timestamps)
             synced_timestamps = synced_timestamps[timestamp_valid_mask]
             lfp_mean = lfp_mean[timestamp_valid_mask]
-
 
             self.insert1(
                 dict(
@@ -683,13 +682,12 @@ class LFP(dj.Imported):
             si_recording = si.concatenate_recordings(si_recs)
 
             synced_timestamps = ephys_sync_func(si_recording.get_times())
-            lfp_mean=si_recording.get_traces(return_scaled=True).mean(axis=1)
+            lfp_mean = si_recording.get_traces(return_scaled=True).mean(axis=1)
 
             # exclude unsynchronized timestamps
             timestamp_valid_mask = ~np.isnan(synced_timestamps)
             synced_timestamps = synced_timestamps[timestamp_valid_mask]
             lfp_mean = lfp_mean[timestamp_valid_mask]
-
 
             self.insert1(
                 dict(
@@ -1124,8 +1122,7 @@ class CuratedClustering(dj.Imported):
         ephys_sync_func = get_sync_ephys_function(key)
         if use_spikeinterface:
             electrode_map = {
-                elec["electrode"]: elec
-                for elec in electrode_query.fetch(as_dict=True)
+                elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
             }
 
         # Kilosort path: sampling rate from recording
@@ -1310,8 +1307,12 @@ class CuratedClustering(dj.Imported):
 
                     # generate final values
                     unit_spike_times = ephys_sync_func(unit_spike_times)
-                    unit_spike_sites = spike_sites[kilosort_dataset.data["spike_clusters"] == unit]
-                    unit_spike_depths = spike_depths[kilosort_dataset.data["spike_clusters"] == unit]
+                    unit_spike_sites = spike_sites[
+                        kilosort_dataset.data["spike_clusters"] == unit
+                    ]
+                    unit_spike_depths = spike_depths[
+                        kilosort_dataset.data["spike_clusters"] == unit
+                    ]
 
                     # exclude spikes from recordings with failed sync (nan spike times)
                     valid_spikes_mask = ~np.isnan(spike_times)
