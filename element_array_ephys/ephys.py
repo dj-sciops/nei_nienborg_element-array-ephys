@@ -587,8 +587,10 @@ class LFP(dj.Imported):
 
     def make(self, key):
         """Populates the LFP tables."""
-        acq_software = (EphysRecording * ProbeInsertion & key).fetch1("acq_software")
+        import spikeinterface as si
+        from spikeinterface import extractors
 
+        acq_software = (EphysRecording * ProbeInsertion & key).fetch1("acq_software")
         ephys_sync_func = get_sync_ephys_function(key)
 
         # Get probe information to recording object
@@ -603,64 +605,41 @@ class LFP(dj.Imported):
             .reset_index()
         )
 
-        electrode_keys, lfp = [], []
         if acq_software == "SpikeGLX":
-            spikeglx_meta_filepath = get_spikeglx_meta_filepath(key)
-            spikeglx_recording = spikeglx.SpikeGLX(spikeglx_meta_filepath.parent)
-
-            lfp_channel_ind = spikeglx_recording.lfmeta.recording_channels[
-                -1 :: -self._skip_channel_counts
-            ]
-
-            # Extract LFP data at specified channels and convert to uV
-            lfp = spikeglx_recording.lf_timeseries[
-                :, lfp_channel_ind
-            ]  # (sample x channel)
-            lfp = (
-                lfp * spikeglx_recording.get_channel_bit_volts("lf")[lfp_channel_ind]
-            ).T  # (channel x sample)
-
-            lfp_time_stamps = (
-                np.arange(lfp.shape[1]) / spikeglx_recording.lfmeta.meta["imSampRate"]
+            si_extractor = (
+                si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
             )
-            lfp_mean = lfp.mean(axis=0)
+            spikeglx_meta_filepaths = (
+                EphysRecording.EphysFile & key & 'file_path LIKE "%.ap.meta"'
+            ).fetch("file_path")
 
-            # exclude unsynchronized timestamps
-            synced_timestamps = ephys_sync_func(lfp_time_stamps)
-            timestamp_valid_mask = ~np.isnan(synced_timestamps)
-            synced_timestamps = synced_timestamps[timestamp_valid_mask]
-            lfp_mean = lfp_mean[timestamp_valid_mask]
-
-            self.insert1(
-                dict(
-                    key,
-                    lfp_sampling_rate=spikeglx_recording.lfmeta.meta["imSampRate"],
-                    lfp_time_stamps=synced_timestamps,
-                    lfp_mean=lfp_mean,
+            si_recs = []
+            for meta_filepath in spikeglx_meta_filepaths:
+                meta_filepath = find_full_path(
+                    get_ephys_root_data_dir(), pathlib.Path(meta_filepath)
                 )
-            )
+                data_dir = meta_filepath.parent
+                spikeglx_recording = spikeglx.SpikeGLX(data_dir)
+                spikeglx_recording.validate_file("lf")
 
-            electrode_query = (
-                probe.ProbeType.Electrode
-                * probe.ElectrodeConfig.Electrode
-                * EphysRecording
-                & key
-            )
-            probe_electrodes = {
-                (shank, shank_col, shank_row): key
-                for key, shank, shank_col, shank_row in zip(
-                    *electrode_query.fetch("KEY", "shank", "shank_col", "shank_row")
+                stream_names, _stream_ids = si.extractors.get_neo_streams(
+                    "spikeglx", folder_path=data_dir
                 )
-            }
+                probe_name = spikeglx_recording.root_name.rsplit(".", 1)[-1]
+                lf_stream_name = f"{probe_name}.lf"
+                if lf_stream_name not in stream_names:
+                    raise FileNotFoundError(
+                        f"Could not find LFP file for recording: {meta_filepath}"
+                    )
 
-            for recorded_site in lfp_channel_ind:
-                shank, shank_col, shank_row, _ = spikeglx_recording.apmeta.shankmap[
-                    "data"
-                ][recorded_site]
-                electrode_keys.append(probe_electrodes[(shank, shank_col, shank_row)])
+                si_rec: si.BaseRecording = si_extractor(
+                    folder_path=data_dir, stream_name=lf_stream_name
+                )
+                si_recs.append(si_rec)
+
+            si_recording = si.concatenate_recordings(si_recs)
+
         elif acq_software == "Trellis":
-            import spikeinterface as si
-            from spikeinterface import extractors
 
             si_extractor = (
                 si.extractors.neoextractors.blackrock.BlackrockRecordingExtractor
@@ -681,39 +660,43 @@ class LFP(dj.Imported):
                 si_recs.append(si_rec.remove_channels(list(non_ephys_chns)))
             si_recording = si.concatenate_recordings(si_recs)
 
-            synced_timestamps = ephys_sync_func(si_recording.get_times())
-            lfp_mean = si_recording.get_traces(return_scaled=True).mean(axis=1)
-
-            # exclude unsynchronized timestamps
-            timestamp_valid_mask = ~np.isnan(synced_timestamps)
-            synced_timestamps = synced_timestamps[timestamp_valid_mask]
-            lfp_mean = lfp_mean[timestamp_valid_mask]
-
-            self.insert1(
-                dict(
-                    key,
-                    lfp_sampling_rate=si_recording.sampling_frequency,
-                    lfp_time_stamps=synced_timestamps,
-                    lfp_mean=lfp_mean,
-                )
-            )
-            # single insert in loop to mitigate potential memory issue
-            for chn_idx in range(si_recording.get_num_channels()):
-                chn_id = si_recording.channel_ids[chn_idx]
-                lfp = si_recording.get_traces(
-                    channel_ids=[chn_id], return_scaled=True
-                ).flatten()
-                lfp = lfp[timestamp_valid_mask]
-                electrode_key = dict(
-                    electrodes_df.query(f"channel_idx == {chn_idx}").iloc[0]
-                )
-                self.Electrode.insert1(
-                    {**key, **electrode_key, "lfp": lfp}, ignore_extra_fields=True
-                )
         else:
             raise NotImplementedError(
                 f"LFP extraction from acquisition software"
                 f" of type {acq_software} is not yet implemented"
+            )
+
+        # Insert LFP info + LFP mean
+        synced_timestamps = ephys_sync_func(si_recording.get_times())
+        lfp_mean = si_recording.get_traces(return_scaled=True).mean(axis=1)
+
+        # exclude unsynchronized timestamps
+        timestamp_valid_mask = ~np.isnan(synced_timestamps)
+        synced_timestamps = synced_timestamps[timestamp_valid_mask]
+        lfp_mean = lfp_mean[timestamp_valid_mask]
+
+        self.insert1(
+            dict(
+                key,
+                lfp_sampling_rate=si_recording.sampling_frequency,
+                lfp_time_stamps=synced_timestamps,
+                lfp_mean=lfp_mean,
+            )
+        )
+
+        # Insert electrode LFPs
+        # (single insert in loop to mitigate potential memory issue)
+        for chn_idx in range(si_recording.get_num_channels()):
+            chn_id = si_recording.channel_ids[chn_idx]
+            lfp = si_recording.get_traces(
+                channel_ids=[chn_id], return_scaled=True
+            ).flatten()
+            lfp = lfp[timestamp_valid_mask]
+            electrode_key = dict(
+                electrodes_df.query(f"channel_idx == {chn_idx}").iloc[0]
+            )
+            self.Electrode.insert1(
+                {**key, **electrode_key, "lfp": lfp}, ignore_extra_fields=True
             )
 
 
