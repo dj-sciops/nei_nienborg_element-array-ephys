@@ -1105,8 +1105,7 @@ class CuratedClustering(dj.Imported):
         ephys_sync_func = get_sync_ephys_function(key)
         if use_spikeinterface:
             electrode_map = {
-                elec["electrode"]: elec
-                for elec in electrode_query.fetch(as_dict=True)
+                elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
             }
 
         # Kilosort path: sampling rate from recording
