@@ -636,7 +636,7 @@ class LFP(dj.Imported):
                     key,
                     lfp_sampling_rate=spikeglx_recording.lfmeta.meta["imSampRate"],
                     lfp_time_stamps=synced_timestamps,
-                    lfp_mean=lfp.mean(axis=0),
+                    lfp_mean=lfp_mean,
                 )
             )
 
