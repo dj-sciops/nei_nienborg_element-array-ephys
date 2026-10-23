@@ -1315,7 +1315,7 @@ class CuratedClustering(dj.Imported):
                     ]
 
                     # exclude spikes from recordings with failed sync (nan spike times)
-                    valid_spikes_mask = ~np.isnan(spike_times)
+                    valid_spikes_mask = ~np.isnan(unit_spike_times)
                     unit_spike_times = unit_spike_times[valid_spikes_mask]
                     unit_spike_sites = unit_spike_sites[valid_spikes_mask]
                     unit_spike_depths = unit_spike_depths[valid_spikes_mask]
