@@ -589,6 +589,8 @@ class LFP(dj.Imported):
         """Populates the LFP tables."""
         acq_software = (EphysRecording * ProbeInsertion & key).fetch1("acq_software")
 
+        ephys_sync_func = get_sync_ephys_function(key)
+
         # Get probe information to recording object
         electrodes_df = (
             (
@@ -618,14 +620,23 @@ class LFP(dj.Imported):
                 lfp * spikeglx_recording.get_channel_bit_volts("lf")[lfp_channel_ind]
             ).T  # (channel x sample)
 
+            lfp_time_stamps = (
+                np.arange(lfp.shape[1]) / spikeglx_recording.lfmeta.meta["imSampRate"]
+            )
+            lfp_mean=lfp.mean(axis=0)
+
+            # exclude unsynchronized timestamps
+            synced_timestamps = ephys_sync_func(lfp_time_stamps)            
+            timestamp_valid_mask = ~np.isnan(synced_timestamps)
+            synced_timestamps = synced_timestamps[timestamp_valid_mask]
+            lfp_mean = lfp_mean[timestamp_valid_mask]
+
+
             self.insert1(
                 dict(
                     key,
                     lfp_sampling_rate=spikeglx_recording.lfmeta.meta["imSampRate"],
-                    lfp_time_stamps=(
-                        np.arange(lfp.shape[1])
-                        / spikeglx_recording.lfmeta.meta["imSampRate"]
-                    ),
+                    lfp_time_stamps=synced_timestamps,
                     lfp_mean=lfp.mean(axis=0),
                 )
             )
@@ -671,15 +682,21 @@ class LFP(dj.Imported):
                 si_recs.append(si_rec.remove_channels(list(non_ephys_chns)))
             si_recording = si.concatenate_recordings(si_recs)
 
-            ephys_sync_func = get_sync_ephys_function(key)
             synced_timestamps = ephys_sync_func(si_recording.get_times())
+            lfp_mean=si_recording.get_traces(return_scaled=True).mean(axis=1)
+
+            # exclude unsynchronized timestamps
+            timestamp_valid_mask = ~np.isnan(synced_timestamps)
+            synced_timestamps = synced_timestamps[timestamp_valid_mask]
+            lfp_mean = lfp_mean[timestamp_valid_mask]
+
 
             self.insert1(
                 dict(
                     key,
                     lfp_sampling_rate=si_recording.sampling_frequency,
                     lfp_time_stamps=synced_timestamps,
-                    lfp_mean=si_recording.get_traces(return_scaled=True).mean(axis=1),
+                    lfp_mean=lfp_mean,
                 )
             )
             # single insert in loop to mitigate potential memory issue
@@ -688,6 +705,7 @@ class LFP(dj.Imported):
                 lfp = si_recording.get_traces(
                     channel_ids=[chn_id], return_scaled=True
                 ).flatten()
+                lfp = lfp[timestamp_valid_mask]
                 electrode_key = dict(
                     electrodes_df.query(f"channel_idx == {chn_idx}").iloc[0]
                 )
