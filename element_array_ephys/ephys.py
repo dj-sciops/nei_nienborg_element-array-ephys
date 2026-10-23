@@ -587,7 +587,11 @@ class LFP(dj.Imported):
 
     def make(self, key):
         """Populates the LFP tables."""
+        import spikeinterface as si
+        from spikeinterface import extractors
+
         acq_software = (EphysRecording * ProbeInsertion & key).fetch1("acq_software")
+        ephys_sync_func = get_sync_ephys_function(key)
 
         # Get probe information to recording object
         electrodes_df = (
@@ -601,56 +605,41 @@ class LFP(dj.Imported):
             .reset_index()
         )
 
-        electrode_keys, lfp = [], []
         if acq_software == "SpikeGLX":
-            spikeglx_meta_filepath = get_spikeglx_meta_filepath(key)
-            spikeglx_recording = spikeglx.SpikeGLX(spikeglx_meta_filepath.parent)
-
-            lfp_channel_ind = spikeglx_recording.lfmeta.recording_channels[
-                -1 :: -self._skip_channel_counts
-            ]
-
-            # Extract LFP data at specified channels and convert to uV
-            lfp = spikeglx_recording.lf_timeseries[
-                :, lfp_channel_ind
-            ]  # (sample x channel)
-            lfp = (
-                lfp * spikeglx_recording.get_channel_bit_volts("lf")[lfp_channel_ind]
-            ).T  # (channel x sample)
-
-            self.insert1(
-                dict(
-                    key,
-                    lfp_sampling_rate=spikeglx_recording.lfmeta.meta["imSampRate"],
-                    lfp_time_stamps=(
-                        np.arange(lfp.shape[1])
-                        / spikeglx_recording.lfmeta.meta["imSampRate"]
-                    ),
-                    lfp_mean=lfp.mean(axis=0),
-                )
+            si_extractor = (
+                si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
             )
+            spikeglx_meta_filepaths = (
+                EphysRecording.EphysFile & key & 'file_path LIKE "%.ap.meta"'
+            ).fetch("file_path")
 
-            electrode_query = (
-                probe.ProbeType.Electrode
-                * probe.ElectrodeConfig.Electrode
-                * EphysRecording
-                & key
-            )
-            probe_electrodes = {
-                (shank, shank_col, shank_row): key
-                for key, shank, shank_col, shank_row in zip(
-                    *electrode_query.fetch("KEY", "shank", "shank_col", "shank_row")
+            si_recs = []
+            for meta_filepath in spikeglx_meta_filepaths:
+                meta_filepath = find_full_path(
+                    get_ephys_root_data_dir(), pathlib.Path(meta_filepath)
                 )
-            }
+                data_dir = meta_filepath.parent
+                spikeglx_recording = spikeglx.SpikeGLX(data_dir)
+                spikeglx_recording.validate_file("lf")
 
-            for recorded_site in lfp_channel_ind:
-                shank, shank_col, shank_row, _ = spikeglx_recording.apmeta.shankmap[
-                    "data"
-                ][recorded_site]
-                electrode_keys.append(probe_electrodes[(shank, shank_col, shank_row)])
+                stream_names, _stream_ids = si.extractors.get_neo_streams(
+                    "spikeglx", folder_path=data_dir
+                )
+                probe_name = spikeglx_recording.root_name.rsplit(".", 1)[-1]
+                lf_stream_name = f"{probe_name}.lf"
+                if lf_stream_name not in stream_names:
+                    raise FileNotFoundError(
+                        f"Could not find LFP file for recording: {meta_filepath}"
+                    )
+
+                si_rec: si.BaseRecording = si_extractor(
+                    folder_path=data_dir, stream_name=lf_stream_name
+                )
+                si_recs.append(si_rec)
+
+            si_recording = si.concatenate_recordings(si_recs)
+
         elif acq_software == "Trellis":
-            import spikeinterface as si
-            from spikeinterface import extractors
 
             si_extractor = (
                 si.extractors.neoextractors.blackrock.BlackrockRecordingExtractor
@@ -671,33 +660,43 @@ class LFP(dj.Imported):
                 si_recs.append(si_rec.remove_channels(list(non_ephys_chns)))
             si_recording = si.concatenate_recordings(si_recs)
 
-            ephys_sync_func = get_sync_ephys_function(key)
-            synced_timestamps = ephys_sync_func(si_recording.get_times())
-
-            self.insert1(
-                dict(
-                    key,
-                    lfp_sampling_rate=si_recording.sampling_frequency,
-                    lfp_time_stamps=synced_timestamps,
-                    lfp_mean=si_recording.get_traces(return_scaled=True).mean(axis=1),
-                )
-            )
-            # single insert in loop to mitigate potential memory issue
-            for chn_idx in range(si_recording.get_num_channels()):
-                chn_id = si_recording.channel_ids[chn_idx]
-                lfp = si_recording.get_traces(
-                    channel_ids=[chn_id], return_scaled=True
-                ).flatten()
-                electrode_key = dict(
-                    electrodes_df.query(f"channel_idx == {chn_idx}").iloc[0]
-                )
-                self.Electrode.insert1(
-                    {**key, **electrode_key, "lfp": lfp}, ignore_extra_fields=True
-                )
         else:
             raise NotImplementedError(
                 f"LFP extraction from acquisition software"
                 f" of type {acq_software} is not yet implemented"
+            )
+
+        # Insert LFP info + LFP mean
+        synced_timestamps = ephys_sync_func(si_recording.get_times())
+        lfp_mean = si_recording.get_traces(return_scaled=True).mean(axis=1)
+
+        # exclude unsynchronized timestamps
+        timestamp_valid_mask = ~np.isnan(synced_timestamps)
+        synced_timestamps = synced_timestamps[timestamp_valid_mask]
+        lfp_mean = lfp_mean[timestamp_valid_mask]
+
+        self.insert1(
+            dict(
+                key,
+                lfp_sampling_rate=si_recording.sampling_frequency,
+                lfp_time_stamps=synced_timestamps,
+                lfp_mean=lfp_mean,
+            )
+        )
+
+        # Insert electrode LFPs
+        # (single insert in loop to mitigate potential memory issue)
+        for chn_idx in range(si_recording.get_num_channels()):
+            chn_id = si_recording.channel_ids[chn_idx]
+            lfp = si_recording.get_traces(
+                channel_ids=[chn_id], return_scaled=True
+            ).flatten()
+            lfp = lfp[timestamp_valid_mask]
+            electrode_key = dict(
+                electrodes_df.query(f"channel_idx == {chn_idx}").iloc[0]
+            )
+            self.Electrode.insert1(
+                {**key, **electrode_key, "lfp": lfp}, ignore_extra_fields=True
             )
 
 
@@ -1070,10 +1069,11 @@ class CuratedClustering(dj.Imported):
         ---
         -> probe.ElectrodeConfig.Electrode  # electrode with highest waveform amplitude for this unit
         -> ClusterQualityLabel
-        spike_count: int         # how many spikes in this recording for this unit
+        spike_count: int         # how many spikes in this recording for this unit. Includes spikes excluded due to failed sync
         spike_times: longblob    # (s) spike times of this unit, relative to the start of the EphysRecording
         spike_sites : longblob   # array of electrode associated with each spike
         spike_depths=null : longblob  # (um) array of depths associated with each spike, relative to the (0, 0) of the probe
+        n_spikes_lost=null : int  # number of spikes for this unit excluded due to failed synchronization
         """
 
     class ManualLabel(dj.Part):
@@ -1105,8 +1105,7 @@ class CuratedClustering(dj.Imported):
         ephys_sync_func = get_sync_ephys_function(key)
         if use_spikeinterface:
             electrode_map = {
-                elec["electrode"]: elec
-                for elec in electrode_query.fetch(as_dict=True)
+                elec["electrode"]: elec for elec in electrode_query.fetch(as_dict=True)
             }
 
         # Kilosort path: sampling rate from recording
@@ -1218,6 +1217,13 @@ class CuratedClustering(dj.Imported):
 
                 assert len(spike_times) == len(spike_sites) == len(spike_depths)
 
+                # spike_times can be NaN for spikes during recordings without valid sync
+                valid_spikes_mask = ~np.isnan(spike_times)
+                spike_times = spike_times[valid_spikes_mask]
+                spike_sites = spike_sites[valid_spikes_mask]
+                spike_depths = spike_depths[valid_spikes_mask]
+                n_spikes_lost = np.sum(~valid_spikes_mask)
+
                 units.append(
                     {
                         **key,
@@ -1228,6 +1234,7 @@ class CuratedClustering(dj.Imported):
                         "spike_count": spike_count_dict[unit_id],
                         "spike_sites": spike_sites,
                         "spike_depths": spike_depths,
+                        "n_spikes_lost": n_spikes_lost,
                     }
                 )
         else:  # read from kilosort outputs
@@ -1279,7 +1286,23 @@ class CuratedClustering(dj.Imported):
                         spike_times[kilosort_dataset.data["spike_clusters"] == unit]
                         / sample_rate
                     )
-                    spike_count = len(unit_spike_times)
+                    unit_spike_count = len(unit_spike_times)
+
+                    # generate final values
+                    unit_spike_times = ephys_sync_func(unit_spike_times)
+                    unit_spike_sites = spike_sites[
+                        kilosort_dataset.data["spike_clusters"] == unit
+                    ]
+                    unit_spike_depths = spike_depths[
+                        kilosort_dataset.data["spike_clusters"] == unit
+                    ]
+
+                    # exclude spikes from recordings with failed sync (nan spike times)
+                    valid_spikes_mask = ~np.isnan(unit_spike_times)
+                    unit_spike_times = unit_spike_times[valid_spikes_mask]
+                    unit_spike_sites = unit_spike_sites[valid_spikes_mask]
+                    unit_spike_depths = unit_spike_depths[valid_spikes_mask]
+                    n_spikes_lost = np.sum(~valid_spikes_mask)
 
                     units.append(
                         {
@@ -1287,14 +1310,11 @@ class CuratedClustering(dj.Imported):
                             "unit": unit,
                             "cluster_quality_label": unit_lbl,
                             **channel2electrode_map[unit_channel],
-                            "spike_times": ephys_sync_func(unit_spike_times),
-                            "spike_count": spike_count,
-                            "spike_sites": spike_sites[
-                                kilosort_dataset.data["spike_clusters"] == unit
-                            ],
-                            "spike_depths": spike_depths[
-                                kilosort_dataset.data["spike_clusters"] == unit
-                            ],
+                            "spike_times": unit_spike_times,
+                            "spike_count": unit_spike_count,
+                            "spike_sites": unit_spike_sites,
+                            "spike_depths": unit_spike_depths,
+                            "n_spikes_lost": n_spikes_lost,
                         }
                     )
 

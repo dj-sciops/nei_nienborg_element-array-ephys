@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import os
-import datajoint as dj
-from datetime import datetime, timezone
-from pathlib import Path
 import json
 import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+import datajoint as dj
 import numpy as np
 import pandas as pd
-from element_interface.utils import dict_to_uuid, find_full_path
+from element_interface.utils import find_full_path
 
 from element_array_ephys import ephys
 from element_array_ephys.spike_sorting import si_spike_sorting as ephys_sorter
-
 
 logger = dj.logger
 
@@ -115,7 +114,7 @@ class ManualCuration(dj.Manual):
         if curation_method != "Phy":
             raise ValueError(f"Unsupported curation method: {curation_method}")
 
-        init_datetime = datetime.now(timezone.utc)
+        # init_datetime = datetime.now(timezone.utc)
 
         # Download the spike sorting results
         assert ephys.CuratedClustering & key, f"Invalid ephys.Clustering key: {key}"
@@ -376,9 +375,7 @@ class ApplyOfficialCuration(dj.Imported):
             next(Path(f) for f in curated_files if Path(f).name == "params.py")
         ).parent
 
-        curation_method = (ManualCuration & official_key).fetch1(
-            "curation_method"
-        )
+        curation_method = (ManualCuration & official_key).fetch1("curation_method")
 
         if curation_method != "Phy":
             raise ValueError(f"Unsupported curation method: {curation_method}")
@@ -487,21 +484,32 @@ class ApplyOfficialCuration(dj.Imported):
                     spike_times[kilosort_dataset.data["spike_clusters"] == cluster_id]
                     / sample_rate
                 )
-                spike_count = len(unit_spike_times)
+                unit_spike_times = ephys_sync_func(unit_spike_times)
+                unit_spike_sites = spike_sites[
+                    kilosort_dataset.data["spike_clusters"] == cluster_id
+                ]
+                unit_spike_depths = spike_depths[
+                    kilosort_dataset.data["spike_clusters"] == cluster_id
+                ]
+                unit_spike_count = len(unit_spike_times)
+
+                # exclude spikes from recordings with failed sync (nan spike times)
+                valid_spikes_mask = ~np.isnan(unit_spike_times)
+                unit_spike_times = unit_spike_times[valid_spikes_mask]
+                unit_spike_sites = unit_spike_sites[valid_spikes_mask]
+                unit_spike_depths = unit_spike_depths[valid_spikes_mask]
+                n_spikes_lost = np.sum(~valid_spikes_mask)
 
                 ephys.CuratedClustering.Unit.insert1(
                     {
                         **unit_key,
                         "cluster_quality_label": "no kilosort label",  # new units will have "no kilosort label" label
                         **channel2electrode_map[unit_channel],
-                        "spike_times": ephys_sync_func(unit_spike_times),
-                        "spike_count": spike_count,
-                        "spike_sites": spike_sites[
-                            kilosort_dataset.data["spike_clusters"] == cluster_id
-                        ],
-                        "spike_depths": spike_depths[
-                            kilosort_dataset.data["spike_clusters"] == cluster_id
-                        ],
+                        "spike_times": unit_spike_times,
+                        "spike_count": unit_spike_count,
+                        "spike_sites": unit_spike_sites,
+                        "spike_depths": unit_spike_depths,
+                        "n_spikes_lost": n_spikes_lost,
                     },
                     allow_direct_insert=True,
                 )
