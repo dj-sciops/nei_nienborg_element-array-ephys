@@ -1070,10 +1070,11 @@ class CuratedClustering(dj.Imported):
         ---
         -> probe.ElectrodeConfig.Electrode  # electrode with highest waveform amplitude for this unit
         -> ClusterQualityLabel
-        spike_count: int         # how many spikes in this recording for this unit
+        spike_count: int         # how many spikes in this recording for this unit. Includes spikes excluded due to failed sync
         spike_times: longblob    # (s) spike times of this unit, relative to the start of the EphysRecording
         spike_sites : longblob   # array of electrode associated with each spike
         spike_depths=null : longblob  # (um) array of depths associated with each spike, relative to the (0, 0) of the probe
+        n_spikes_lost=null : int  # number of spikes for this unit excluded due to failed synchronization
         """
 
     class ManualLabel(dj.Part):
@@ -1218,6 +1219,13 @@ class CuratedClustering(dj.Imported):
 
                 assert len(spike_times) == len(spike_sites) == len(spike_depths)
 
+                # spike_times can be NaN for spikes during recordings without valid sync
+                valid_spikes_mask = ~np.isnan(spike_times)
+                spike_times = spike_times[valid_spikes_mask]
+                spike_sites = spike_sites[valid_spikes_mask]
+                spike_depths = spike_depths[valid_spikes_mask]
+                n_spikes_lost = np.sum(~valid_spikes_mask)
+
                 units.append(
                     {
                         **key,
@@ -1228,6 +1236,7 @@ class CuratedClustering(dj.Imported):
                         "spike_count": spike_count_dict[unit_id],
                         "spike_sites": spike_sites,
                         "spike_depths": spike_depths,
+                        "n_spikes_lost": n_spikes_lost,
                     }
                 )
         else:  # read from kilosort outputs
@@ -1279,7 +1288,19 @@ class CuratedClustering(dj.Imported):
                         spike_times[kilosort_dataset.data["spike_clusters"] == unit]
                         / sample_rate
                     )
-                    spike_count = len(unit_spike_times)
+                    unit_spike_count = len(unit_spike_times)
+
+                    # generate final values
+                    unit_spike_times = ephys_sync_func(unit_spike_times)
+                    unit_spike_sites = spike_sites[kilosort_dataset.data["spike_clusters"] == unit]
+                    unit_spike_depths = spike_depths[kilosort_dataset.data["spike_clusters"] == unit]
+
+                    # exclude spikes from recordings with failed sync (nan spike times)
+                    valid_spikes_mask = ~np.isnan(spike_times)
+                    unit_spike_times = unit_spike_times[valid_spikes_mask]
+                    unit_spike_sites = unit_spike_sites[valid_spikes_mask]
+                    unit_spike_depths = unit_spike_depths[valid_spikes_mask]
+                    n_spikes_lost = np.sum(~valid_spikes_mask)
 
                     units.append(
                         {
@@ -1287,14 +1308,11 @@ class CuratedClustering(dj.Imported):
                             "unit": unit,
                             "cluster_quality_label": unit_lbl,
                             **channel2electrode_map[unit_channel],
-                            "spike_times": ephys_sync_func(unit_spike_times),
-                            "spike_count": spike_count,
-                            "spike_sites": spike_sites[
-                                kilosort_dataset.data["spike_clusters"] == unit
-                            ],
-                            "spike_depths": spike_depths[
-                                kilosort_dataset.data["spike_clusters"] == unit
-                            ],
+                            "spike_times": unit_spike_times,
+                            "spike_count": unit_spike_count,
+                            "spike_sites": unit_spike_sites,
+                            "spike_depths": unit_spike_depths,
+                            "n_spikes_lost": n_spikes_lost,
                         }
                     )
 
