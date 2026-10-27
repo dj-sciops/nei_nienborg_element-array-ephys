@@ -588,7 +588,7 @@ class LFP(dj.Imported):
     def make(self, key):
         """Populates the LFP tables."""
         import spikeinterface as si
-        from spikeinterface import extractors
+        from spikeinterface import extractors  # noqa F401
 
         acq_software = (EphysRecording * ProbeInsertion & key).fetch1("acq_software")
         ephys_sync_func = get_sync_ephys_function(key)
@@ -1139,7 +1139,7 @@ class CuratedClustering(dj.Imported):
         """Load sorting outputs and compute unit properties."""
         if use_spikeinterface:
             import spikeinterface as si
-            from spikeinterface import sorters
+            from spikeinterface import sorters  # noqa F401
 
             sorting_file = output_dir / sorter_name / "spike_sorting" / "si_sorting.pkl"
             si_sorting_: si.sorters.BaseSorter = si.load_extractor(
@@ -1165,9 +1165,6 @@ class CuratedClustering(dj.Imported):
             unit_peak_channel: dict[int, int] = {
                 u: chn[0] for u, chn in unit_peak_channel.items()
             }
-
-            spike_count_dict: dict[int, int] = si_sorting.count_num_spikes_per_unit()
-            # {unit: spike_count}
 
             # Rebuild channel2electrode_map from probe's actual channel indices
             channel2electrode_map = {
@@ -1222,6 +1219,7 @@ class CuratedClustering(dj.Imported):
                 spike_times = spike_times[valid_spikes_mask]
                 spike_sites = spike_sites[valid_spikes_mask]
                 spike_depths = spike_depths[valid_spikes_mask]
+                spike_count = len(spike_times)
                 n_spikes_lost = np.sum(~valid_spikes_mask)
 
                 units.append(
@@ -1231,7 +1229,7 @@ class CuratedClustering(dj.Imported):
                         "unit": unit_id,
                         "cluster_quality_label": cluster_quality_label_map[unit_id],
                         "spike_times": spike_times,
-                        "spike_count": spike_count_dict[unit_id],
+                        "spike_count": spike_count,
                         "spike_sites": spike_sites,
                         "spike_depths": spike_depths,
                         "n_spikes_lost": n_spikes_lost,
@@ -1286,7 +1284,6 @@ class CuratedClustering(dj.Imported):
                         spike_times[kilosort_dataset.data["spike_clusters"] == unit]
                         / sample_rate
                     )
-                    unit_spike_count = len(unit_spike_times)
 
                     # generate final values
                     unit_spike_times = ephys_sync_func(unit_spike_times)
@@ -1302,6 +1299,7 @@ class CuratedClustering(dj.Imported):
                     unit_spike_times = unit_spike_times[valid_spikes_mask]
                     unit_spike_sites = unit_spike_sites[valid_spikes_mask]
                     unit_spike_depths = unit_spike_depths[valid_spikes_mask]
+                    unit_spike_count = len(unit_spike_times)
                     n_spikes_lost = np.sum(~valid_spikes_mask)
 
                     units.append(
@@ -1380,7 +1378,7 @@ class WaveformSet(dj.Imported):
         waveforms=null: longblob  # (uV) (spike x sample) waveforms of a sampling of spikes at the given electrode for the given unit
         """
 
-    def make(self, key):
+    def make(self, key):  # noqa C901
         """Populates waveform tables."""
         clustering_method, output_dir = (
             ClusteringTask * ClusteringParamSet & key
