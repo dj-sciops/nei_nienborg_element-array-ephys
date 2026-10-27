@@ -569,6 +569,8 @@ class LFP(dj.Imported):
     lfp_mean: longblob         # (uV) mean of LFP across electrodes - shape (time,)
     """
 
+    _skip_channel_counts = 11
+
     class Electrode(dj.Part):
         """Saves local field potential data for each electrode.
 
@@ -605,6 +607,7 @@ class LFP(dj.Imported):
             .reset_index()
         )
 
+        lfp_channel_idxs = None  # ingest LFP on these channels
         if acq_software == "SpikeGLX":
             si_extractor = (
                 si.extractors.neoextractors.spikeglx.SpikeGLXRecordingExtractor
@@ -636,8 +639,11 @@ class LFP(dj.Imported):
                     folder_path=data_dir, stream_name=lf_stream_name
                 )
                 si_recs.append(si_rec)
-
             si_recording = si.concatenate_recordings(si_recs)
+
+            lfp_channel_idxs = np.arange(si_recording.get_num_channels())[
+                :: self._skip_channel_counts
+            ]
 
         elif acq_software == "Trellis":
 
@@ -659,6 +665,8 @@ class LFP(dj.Imported):
                 )
                 si_recs.append(si_rec.remove_channels(list(non_ephys_chns)))
             si_recording = si.concatenate_recordings(si_recs)
+
+            lfp_channel_idxs = np.arange(si_recording.get_num_channels())
 
         else:
             raise NotImplementedError(
@@ -700,7 +708,7 @@ class LFP(dj.Imported):
 
         # Insert electrode LFPs
         # (single insert in loop to mitigate potential memory issue)
-        for chn_idx in range(si_recording.get_num_channels()):
+        for chn_idx in lfp_channel_idxs:
             chn_id = si_recording.channel_ids[chn_idx]
             lfp = si_recording.get_traces(
                 channel_ids=[chn_id], return_scaled=True
