@@ -392,6 +392,7 @@ class PostProcessing(dj.Imported):
                 folder=analyzer_output_dir,
                 sparse=True,
                 overwrite=True,
+                **job_kwargs,
             )
 
             # The order of extension computation is drawn from sorting_analyzer.get_computable_extensions()
