@@ -668,7 +668,21 @@ class LFP(dj.Imported):
 
         # Insert LFP info + LFP mean
         synced_timestamps = ephys_sync_func(si_recording.get_times())
-        lfp_mean = si_recording.get_traces(return_scaled=True).mean(axis=1)
+
+        BATCH_SIZE = 10
+        n_chan = si_recording.get_num_channels()
+        channel_idxs = range(n_chan)
+        channel_ids = si_recording.channel_ids[channel_idxs]
+        lfp_mean = np.zeros_like(synced_timestamps, dtype=np.float64)
+        for chunk in np.array_split(
+            channel_ids, np.arange(BATCH_SIZE, len(channel_ids), BATCH_SIZE)
+        ):
+            lfp_mean += (
+                si_recording.get_traces(channel_ids=chunk, return_scaled=True).sum(
+                    axis=1, dtype=np.float64
+                )
+                / n_chan
+            )
 
         # exclude unsynchronized timestamps
         timestamp_valid_mask = ~np.isnan(synced_timestamps)
